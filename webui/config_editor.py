@@ -39,7 +39,40 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "REGISTRATION_DRIVER", "file": "roxybrowser.py", "type": "str", "group": "注册方式",
-        "label": "注册驱动", "help": "protocol=原纯协议注册；roxy=调用 RoxyBrowser 指纹浏览器自动化注册",
+        "label": "注册驱动", "help": "protocol=纯协议；roxy=RoxyBrowser；browser_use=Browser Use Cloud+Playwright",
+    },
+    # ---- Browser Use Cloud ----
+    {
+        "key": "BROWSER_USE_API_KEY", "file": "browser_use.py", "type": "str", "group": "Browser Use",
+        "label": "Browser Use API Key", "help": "Cloud Dashboard 创建的 API Key；连接 CDP 时作为 apiKey 查询参数",
+    },
+    {
+        "key": "BROWSER_USE_PROXY_COUNTRY_CODE", "file": "browser_use.py", "type": "str", "group": "Browser Use",
+        "label": "代理国家代码", "help": "两位国家码，如 jp/us/sg；配合 Browser Use 内置 residential proxy",
+    },
+    {
+        "key": "BROWSER_USE_USE_PROXY", "file": "browser_use.py", "type": "bool", "group": "Browser Use",
+        "label": "使用内置代理", "help": "True=连接参数带 proxyCountryCode；False=不强制传国家代理参数",
+    },
+    {
+        "key": "BROWSER_USE_PROFILE_ID", "file": "browser_use.py", "type": "str", "group": "Browser Use",
+        "label": "Profile ID", "help": "可选。填写则复用 Browser Use profile 的 cookies/localStorage；批量建议留空",
+    },
+    {
+        "key": "BROWSER_USE_CDP_BASE", "file": "browser_use.py", "type": "str", "group": "Browser Use",
+        "label": "CDP 地址", "help": "默认 wss://connect.browser-use.com",
+    },
+    {
+        "key": "BROWSER_USE_TIMEOUT", "file": "browser_use.py", "type": "int", "group": "Browser Use",
+        "label": "操作超时(秒)", "help": "Playwright 默认操作超时",
+    },
+    {
+        "key": "BROWSER_USE_KEEP_BROWSER_OPEN", "file": "browser_use.py", "type": "bool", "group": "Browser Use",
+        "label": "保留远端会话", "help": "调试时可不主动 browser.close()；默认 False",
+    },
+    {
+        "key": "BROWSER_USE_START_URL", "file": "browser_use.py", "type": "str", "group": "Browser Use",
+        "label": "起始 URL", "help": "默认 https://chatgpt.com/auth/login",
     },
     {
         "key": "ROXY_API_BASE", "file": "roxybrowser.py", "type": "str", "group": "RoxyBrowser",

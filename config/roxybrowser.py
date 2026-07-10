@@ -9,8 +9,9 @@ RoxyBrowser 指纹浏览器自动化注册配置。
 """
 
 # 注册驱动：
-#   "protocol" = 原有 curl_cffi 纯协议注册
-#   "roxy"     = 调用 RoxyBrowser 指纹浏览器 + Selenium 自动化注册
+#   "protocol"     = 原有 curl_cffi 纯协议注册
+#   "roxy"         = 调用 RoxyBrowser 指纹浏览器 + Selenium 自动化注册
+#   "browser_use"  = Browser Use Cloud stealth Chromium + Playwright
 REGISTRATION_DRIVER: str = "roxy"
 
 # RoxyBrowser 本地 API
