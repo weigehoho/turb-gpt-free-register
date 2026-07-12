@@ -3,18 +3,14 @@
 配置读写层（供 WebUI /api/config 使用）。
 
 设计原则：
-    1. 白名单：只暴露"运行时安全"的开关/数值/默��值，协议级常量
+    1. 白名单：只暴露"运行时安全"的开关/数值/默认值，协议级常量
        （client_id / scope / sentinel 版本等）一律不开放，避免一改就废号。
-    2. 行级精确替换：用正则只替换 `KEY = 值` 那一行的右值，保留注释、
-       空行、缩进、类型标注（`X: bool = True`），最大限度不破坏原文件格式。
-    3. 原子写：先写 .tmp 再 replace，避免写一半导致 config 文件损坏。
-    4. 读用「源码解析」而非 import，避免进程内常量已被缓存、读到旧值；
-       也避免 import 触发副作用。
-
-注意：config 是在各模块进程启动时 `from config import X` 固化的，
-改完文件需要重启 Web 服务才会生效——前端会显式提示。
+    2. 所有 WebUI 可编辑项统一写入项目根 `.env`，不再修改 `config/*.py`。
+    3. `config/*.py` 只保留默认值；运行时通过 config.env_loader 用 `.env` 覆盖。
+    4. 读取时优先 `.env`，缺失时回退解析 `config/*.py` 默认值。
 """
 import ast
+import os
 import re
 from pathlib import Path
 
@@ -115,6 +111,14 @@ EDITABLE_FIELDS = [
         "label": "操作超时(秒)", "help": "Playwright 默认操作超时",
     },
     {
+        "key": "BROWSER_USE_FAST_MODE", "file": "browser_use.py", "type": "bool", "group": "Browser Use",
+        "label": "快速模式", "help": "减少 Browser Use 额外等待和 humanize 延迟；建议开启，异常排查时可关闭",
+    },
+    {
+        "key": "BROWSER_USE_LOG_TIMING", "file": "browser_use.py", "type": "bool", "group": "Browser Use",
+        "label": "耗时日志", "help": "打印 Browser Use 各阶段耗时：连接、打开页面、邮箱、OTP、手机、callback",
+    },
+    {
         "key": "BROWSER_USE_KEEP_BROWSER_OPEN", "file": "browser_use.py", "type": "bool", "group": "Browser Use",
         "label": "保留远端会话", "help": "调试时可不主动 browser.close()；默认 False",
     },
@@ -185,7 +189,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "CODEX_OAUTH_DRIVER", "file": "codex.py", "type": "str", "group": "CPA / Codex",
-        "label": "Codex授权驱动", "help": "protocol=原协议授权；roxy=用 RoxyBrowser；cloak=用 CloakBrowser；same_as_registration=跟随注册驱动",
+        "label": "Codex授权驱动", "help": "protocol=原协议授权；roxy=用 RoxyBrowser；cloak=用 CloakBrowser；browser_use=用 Browser Use Cloud；same_as_registration=跟随注册驱动",
     },
     {
         "key": "ROXY_CODEX_CALLBACK_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
@@ -231,6 +235,10 @@ EDITABLE_FIELDS = [
     {
         "key": "EMAIL_SOURCE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
         "label": "邮箱来源", "help": "可填单个或多个，逗号分隔并按顺序兜底：outlook,generic_api,cloudflare_domain",
+    },
+    {
+        "key": "OUTLOOK_FETCH_MODE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "Outlook取件模式", "help": "auto=远端优先，远端 402/DEPLOYMENT_DISABLED 自动切 Graph 直连；direct=只用 Microsoft Graph 直连；remote=只用远端服务",
     },
     {
         "key": "EMAIL_DOMAIN", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
@@ -383,30 +391,68 @@ def _parse_value_from_source(source: str, key: str, vtype: str):
         return raw
 
 
+def _parse_env_typed_value(raw: str, fallback, vtype: str):
+    """把 .env 字符串按字段类型转换；失败时回退 fallback。"""
+    from config.env_loader import env_value
+    return env_value("__NO_SUCH_ENV_KEY__", fallback, vtype) if raw is None else _coerce_raw_value(raw, fallback, vtype)
+
+
+def _coerce_raw_value(raw: str, fallback, vtype: str):
+    try:
+        if vtype == "bool":
+            return str(raw).strip().lower() in ("true", "1", "yes", "on", "y")
+        if vtype == "int":
+            return int(str(raw).strip())
+        if vtype == "float":
+            return float(str(raw).strip())
+        if vtype == "list_str_multiline":
+            text = str(raw)
+            try:
+                val = ast.literal_eval(text)
+                if isinstance(val, (list, tuple)):
+                    return [str(x).strip() for x in val if str(x).strip()]
+            except Exception:
+                pass
+            return [line.strip() for line in text.splitlines() if line.strip()]
+        return str(raw)
+    except Exception:
+        return fallback
+
+
 def get_config() -> list[dict]:
-    """返回所有可编辑项的当前值 + 元信息，供前端渲染表单。"""
-    from config.env_loader import env_str, load_env
+    """返回所有可编辑项的当前值 + 元信息，供前端渲染表单。
+
+    优先读取 `.env` / 环境变量；没有配置时回退到 `config/*.py` 默认值。
+    """
+    from config.env_loader import load_env, read_env_file
     load_env(override=True)
+    env_file_values = read_env_file()
 
     out = []
     for field in EDITABLE_FIELDS:
-        storage = field.get("storage") or "py"
-        if storage == "env":
-            value = env_str(field["key"], "")
+        key = field["key"]
+        path = _config_path(field["file"])
+        source = path.read_text(encoding="utf-8") if path.exists() else ""
+        fallback = _parse_value_from_source(source, key, field["type"])
+
+        if key in env_file_values:
+            value = _coerce_raw_value(env_file_values[key], fallback, field["type"])
+        elif os.getenv(key) is not None:
+            value = _coerce_raw_value(os.getenv(key, ""), fallback, field["type"])
         else:
-            path = _config_path(field["file"])
-            source = path.read_text(encoding="utf-8") if path.exists() else ""
-            value = _parse_value_from_source(source, field["key"], field["type"])
+            value = fallback
+
         if field["type"] in ("str", "list_str_multiline"):
             value = _normalize_config_value(value, field["type"])
         item = dict(field)
+        item["storage"] = "env"
         item["value"] = value
         out.append(item)
     return out
 
 
 # ============================================================
-# 写：行级精确替换右值，保留注释和格式
+# 写：统一写 .env，不修改 config/*.py
 # ============================================================
 
 
@@ -515,51 +561,38 @@ def _atomic_write(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
-def update_config(updates: dict) -> dict:
-    """
-    批量更新配置。updates: {key: value}。
+def _format_env_value(value, vtype: str) -> str:
+    """把前端值格式化成适合写入 .env 的字符串。"""
+    if vtype == "bool":
+        if isinstance(value, str):
+            value = value.strip().lower() in ("true", "1", "yes", "on", "y")
+        return "True" if value else "False"
+    if vtype == "int":
+        return str(int(value))
+    if vtype == "float":
+        return repr(float(value))
+    if vtype == "list_str_multiline":
+        lines = _normalize_config_value(value, vtype)
+        return "\n".join(lines)
+    if vtype == "str":
+        return _normalize_config_value(value, vtype)
+    return "" if value is None else str(value)
 
-    - 普通项写回 config/*.py
-    - storage=env 的密钥项写到项目根 .env，不改 py 默认值
-    返回 {"updated": [...], "ignored": [...], "env_updated": [...]}。
-    """
+
+def update_config(updates: dict) -> dict:
+    """批量更新配置。所有 WebUI 可编辑项只写项目根 `.env`。"""
     from config.env_loader import write_env_values, load_env
 
     updated, ignored = [], []
     env_updates: dict[str, str] = {}
-    by_file: dict[str, list[tuple[dict, object]]] = {}
 
     for key, value in updates.items():
         field = _FIELD_BY_KEY.get(key)
         if field is None:
             ignored.append(key)
             continue
-        if (field.get("storage") or "py") == "env":
-            if field["type"] == "str":
-                value = _normalize_config_value(value, "str")
-            env_updates[field["key"]] = "" if value is None else str(value)
-            updated.append(key)
-            continue
-        by_file.setdefault(field["file"], []).append((field, value))
-
-    for filename, items in by_file.items():
-        path = _config_path(filename)
-        source = path.read_text(encoding="utf-8")
-        for field, value in items:
-            if field["type"] == "list_str_multiline":
-                value = _normalize_config_value(value, field["type"])
-                lines = value if isinstance(value, list) else str(value).splitlines()
-                source = _replace_proxy_pool(source, lines)
-            else:
-                if field["type"] == "str":
-                    value = _normalize_config_value(value, field["type"])
-                literal = _format_literal(value, field["type"])
-                source = _replace_scalar(source, field["key"], literal)
-            if field["key"] not in updated:
-                updated.append(field["key"])
-        # 校验改完仍是合法 Python，再落盘
-        ast.parse(source)
-        _atomic_write(path, source)
+        env_updates[key] = _format_env_value(value, field["type"])
+        updated.append(key)
 
     env_updated = write_env_values(env_updates) if env_updates else []
     if env_updated:

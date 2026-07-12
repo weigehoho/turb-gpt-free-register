@@ -5,6 +5,7 @@
 协议请求本身很快；真实浏览器人工操作通常会有页面加载、阅读、输入、切换邮箱
 等停顿。这里集中配置轻量随机延迟，避免全流程固定节拍。
 """
+from config.env_loader import apply_env_overrides
 
 # 总开关。关闭后 delay() 直接返回。
 ENABLE_HUMANIZE_DELAY = True
@@ -29,3 +30,6 @@ HUMANIZE_DELAYS = {
     # 并发任务错峰。
     "job_stagger": (0.4, 1.8),
 }
+
+# ---- .env overrides for WebUI editable fields ----
+apply_env_overrides(globals(), {'ENABLE_HUMANIZE_DELAY': 'bool', 'HUMANIZE_DELAY_FACTOR': 'float'})

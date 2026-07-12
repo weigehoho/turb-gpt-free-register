@@ -8,5 +8,9 @@
 
 关掉 2FA 不会影响账号可用性，仅意味着账号没有动态口令保护，且少收一封 OTP 邮件。
 """
+from config.env_loader import apply_env_overrides
 
 ENABLE_2FA = False
+
+# ---- .env overrides for WebUI editable fields ----
+apply_env_overrides(globals(), {'ENABLE_2FA': 'bool'})

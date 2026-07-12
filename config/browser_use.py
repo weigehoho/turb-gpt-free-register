@@ -11,7 +11,7 @@ Browser Use Cloud 配置。
   2. 在 .env 填入 BROWSER_USE_API_KEY（也可用 WebUI 密钥字段写入 .env）
   3. 推荐先关 Codex：ENABLE_CODEX_AUTO = False
 """
-from config.env_loader import env_str
+from config.env_loader import env_str, apply_env_overrides
 
 # Browser Use API Key（Cloud Dashboard 创建；优先读 .env / 环境变量）
 BROWSER_USE_API_KEY: str = env_str("BROWSER_USE_API_KEY", "")
@@ -41,6 +41,12 @@ BROWSER_USE_PROFILE_ID: str = ""
 BROWSER_USE_TIMEOUT: int = 90
 BROWSER_USE_NAVIGATION_TIMEOUT: int = 90
 
+# 快速模式：减少 Browser Use 流程里额外 human_delay 和长等待；默认开启。
+BROWSER_USE_FAST_MODE: bool = True
+
+# 阶段耗时日志：打印 connect/goto/email/otp/phone/callback 等步骤耗时，方便定位慢点。
+BROWSER_USE_LOG_TIMING: bool = True
+
 # 任务结束后是否主动断开 CDP
 BROWSER_USE_KEEP_BROWSER_OPEN: bool = False
 
@@ -50,3 +56,6 @@ BROWSER_USE_EXTRA_QUERY: dict = {}
 
 # 打开的起始注册页
 BROWSER_USE_START_URL: str = "https://chatgpt.com/auth/login"
+
+# ---- .env overrides for WebUI editable fields ----
+apply_env_overrides(globals(), {'BROWSER_USE_API_KEY': 'str', 'BROWSER_USE_PROXY_COUNTRY_CODE': 'str', 'BROWSER_USE_USE_PROXY': 'bool', 'BROWSER_USE_PROFILE_ID': 'str', 'BROWSER_USE_CDP_BASE': 'str', 'BROWSER_USE_TIMEOUT': 'int', 'BROWSER_USE_FAST_MODE': 'bool', 'BROWSER_USE_LOG_TIMING': 'bool', 'BROWSER_USE_KEEP_BROWSER_OPEN': 'bool', 'BROWSER_USE_START_URL': 'str'})

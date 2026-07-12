@@ -28,6 +28,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
+from urllib.parse import urlencode
 from pathlib import Path
 
 from curl_cffi.requests import Session as CurlSession
@@ -49,6 +50,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # 邮箱 → account 上下文的内存缓存，fetch_latest_otp 用
 _CONTEXT_CACHE: dict[str, "OutlookAccount"] = {}
+
+# 远端 mail.chatai.codes 被禁用时，本进程内直接跳过远端，走 Microsoft Graph 直连。
+_REMOTE_DISABLED = False
+_MS_TOKEN_CACHE: dict[str, tuple[str, float]] = {}
 
 
 @dataclass
@@ -331,11 +336,276 @@ def import_outlook_from_text(text: str) -> tuple[int, int]:
 # 抓取邮件：Graph 失败回退 IMAP
 # ============================================================
 
+
+def _outlook_fetch_mode() -> str:
+    return str(getattr(_email_cfg, "OUTLOOK_FETCH_MODE", "auto") or "auto").strip().lower()
+
+
+def _is_remote_disabled_error(exc: Exception | str) -> bool:
+    text = str(exc or "")
+    return "DEPLOYMENT_DISABLED" in text or "HTTP 402" in text or "Payment required" in text
+
+
+def _ms_http() -> CurlSession:
+    s = CurlSession(impersonate=IMPERSONATE)
+    s.headers.update({
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+    })
+    s.timeout = 30
+    return s
+
+
+def _token_looks_jwt(token: str) -> bool:
+    return str(token or "").count(".") >= 2
+
+
+def _ms_access_token(account: OutlookAccount, http: CurlSession | None = None) -> tuple[str, str]:
+    """用 refresh_token 换取可读邮件的 access_token。
+
+    返回 (token, kind)：
+      - kind="graph"：JWT，可访问 graph.microsoft.com
+      - kind="outlook"：Outlook REST token，可访问 outlook.office.com/api/v2.0
+    """
+    cache_key = f"{account.email}|{account.client_id}|{account.refresh_token[:24]}"
+    cached = _MS_TOKEN_CACHE.get(cache_key)
+    now = time.time()
+    if cached and cached[1] - now > 120:
+        token_kind, token = cached[0].split(":", 1) if ":" in cached[0] else ("graph", cached[0])
+        return token, token_kind
+
+    own_http = http is None
+    http = http or _ms_http()
+    try:
+        attempts = [
+            (
+                "graph",
+                "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+                {
+                    "client_id": account.client_id,
+                    "grant_type": "refresh_token",
+                    "refresh_token": account.refresh_token,
+                    "scope": "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access",
+                },
+            ),
+            (
+                "graph",
+                "https://login.microsoftonline.com/common/oauth2/token",
+                {
+                    "client_id": account.client_id,
+                    "grant_type": "refresh_token",
+                    "refresh_token": account.refresh_token,
+                    "resource": "https://graph.microsoft.com",
+                },
+            ),
+            (
+                "outlook",
+                "https://login.microsoftonline.com/common/oauth2/token",
+                {
+                    "client_id": account.client_id,
+                    "grant_type": "refresh_token",
+                    "refresh_token": account.refresh_token,
+                    "resource": "https://outlook.office.com",
+                },
+            ),
+            (
+                "outlook",
+                "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+                {
+                    "client_id": account.client_id,
+                    "grant_type": "refresh_token",
+                    "refresh_token": account.refresh_token,
+                    "scope": "https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access",
+                },
+            ),
+        ]
+        last_text = ""
+        for kind, url, payload in attempts:
+            resp = http.post(
+                url,
+                headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+                data=urlencode(payload),
+            )
+            text = resp.text or ""
+            last_text = text[:500]
+            data = {}
+            try:
+                data = resp.json()
+            except Exception:
+                pass
+            if resp.status_code == 200 and isinstance(data, dict) and data.get("access_token"):
+                expires_in = int(data.get("expires_in") or 3600)
+                token = str(data["access_token"])
+                # Graph 必须是 JWT；不是 JWT 就不能打 graph.microsoft.com。
+                if kind == "graph" and not _token_looks_jwt(token):
+                    logger.debug("[Outlook] 换到的 Graph token 不是 JWT，继续尝试 Outlook REST token")
+                    continue
+                _MS_TOKEN_CACHE[cache_key] = (f"{kind}:{token}", now + max(300, expires_in - 60))
+                logger.debug("[Outlook] Microsoft token 获取成功 kind=%s jwt=%s", kind, _token_looks_jwt(token))
+                return token, kind
+        raise OutlookClientError(f"Microsoft OAuth refresh_token 换 token 失败: {last_text}")
+    finally:
+        if own_http:
+            http.close()
+
+
+def _normalize_ms_message(m: dict) -> dict:
+    sender = (((m.get("from") or {}).get("emailAddress") or {}) if isinstance(m.get("from"), dict) else {})
+    body = m.get("body") if isinstance(m.get("body"), dict) else {}
+    content = body.get("content") if isinstance(body, dict) else ""
+    received = m.get("receivedDateTime") or m.get("DateTimeReceived") or m.get("date") or ""
+    return {
+        "id": m.get("id") or m.get("Id") or "",
+        "subject": m.get("subject") or m.get("Subject") or "",
+        "from": m.get("from") or m.get("From") or {},
+        "fromEmail": sender.get("address") or sender.get("Address") or "",
+        "fromName": sender.get("name") or sender.get("Name") or "",
+        "receivedDateTime": received,
+        "date": received,
+        "bodyPreview": m.get("bodyPreview") or m.get("BodyPreview") or "",
+        "content": content or "",
+        "body": content or "",
+        "html": content or "",
+    }
+
+
+def _fetch_graph_messages(http: CurlSession, token: str) -> list[dict]:
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+        "Prefer": 'outlook.body-content-type="html"',
+    }
+    url = "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages"
+    params = {
+        "$top": "20",
+        "$orderby": "receivedDateTime desc",
+        "$select": "id,subject,from,receivedDateTime,bodyPreview,body",
+    }
+    resp = http.get(url, headers=headers, params=params)
+    text = resp.text or ""
+    if resp.status_code != 200:
+        raise OutlookClientError(f"Microsoft Graph messages HTTP {resp.status_code}: {text[:500]}")
+    data = resp.json()
+    rows = data.get("value") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        raise OutlookClientError(f"Microsoft Graph 响应缺少 value: {str(data)[:300]}")
+    return [_normalize_ms_message(m) for m in rows if isinstance(m, dict)]
+
+
+def _fetch_outlook_rest_messages(http: CurlSession, token: str) -> list[dict]:
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+    }
+    url = "https://outlook.office.com/api/v2.0/me/mailfolders/inbox/messages"
+    attempts = [
+        {
+            "$top": "20",
+            "$orderby": "ReceivedDateTime desc",
+            "$select": "Id,Subject,From,ReceivedDateTime,BodyPreview,Body",
+        },
+        {
+            "$top": "20",
+            "$orderby": "DateTimeReceived desc",
+            "$select": "Id,Subject,From,DateTimeReceived,BodyPreview,Body",
+        },
+        {"$top": "20"},
+    ]
+    last_text = ""
+    data = None
+    for params in attempts:
+        resp = http.get(url, headers=headers, params=params)
+        text = resp.text or ""
+        last_text = text[:500]
+        if resp.status_code == 200:
+            data = resp.json()
+            break
+        # 字段名不兼容时自动降级下一套参数。
+        if resp.status_code == 400 and ("Could not find a property" in text or "ParseUri" in text):
+            logger.debug("[Outlook] Outlook REST 参数不兼容，降级重试: %s", text[:220])
+            continue
+        raise OutlookClientError(f"Outlook REST messages HTTP {resp.status_code}: {text[:500]}")
+    if data is None:
+        raise OutlookClientError(f"Outlook REST messages 失败: {last_text}")
+    rows = data.get("value") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        raise OutlookClientError(f"Outlook REST 响应缺少 value: {str(data)[:300]}")
+    out = []
+    for m in rows:
+        if not isinstance(m, dict):
+            continue
+        # Outlook REST 字段转 Graph 风格；不同版本字段大小写不同。
+        from_obj = m.get("From") or m.get("from") if isinstance(m.get("From") or m.get("from"), dict) else {}
+        email_addr = from_obj.get("EmailAddress") or from_obj.get("emailAddress") if isinstance(from_obj, dict) else {}
+        if not isinstance(email_addr, dict):
+            email_addr = {}
+        body_obj = m.get("Body") or m.get("body") if isinstance(m.get("Body") or m.get("body"), dict) else {}
+        received = m.get("ReceivedDateTime") or m.get("DateTimeReceived") or m.get("receivedDateTime") or ""
+        out.append({
+            "id": m.get("Id") or m.get("id") or "",
+            "subject": m.get("Subject") or m.get("subject") or "",
+            "from": {"emailAddress": {"address": email_addr.get("Address") or email_addr.get("address") or "", "name": email_addr.get("Name") or email_addr.get("name") or ""}},
+            "fromEmail": email_addr.get("Address") or email_addr.get("address") or "",
+            "fromName": email_addr.get("Name") or email_addr.get("name") or "",
+            "receivedDateTime": received,
+            "date": received,
+            "bodyPreview": m.get("BodyPreview") or m.get("bodyPreview") or "",
+            "content": body_obj.get("Content") or body_obj.get("content") or "",
+            "body": body_obj.get("Content") or body_obj.get("content") or "",
+            "html": body_obj.get("Content") or body_obj.get("content") or "",
+        })
+    logger.debug(f"[Outlook] Outlook REST 直连拿到 {len(out)} 封邮件")
+    return out
+
+
+def _fetch_via_graph_direct(account: OutlookAccount) -> list[dict]:
+    """直连 Microsoft API 读取 Inbox 最新邮件；Graph 不兼容时自动 Outlook REST。"""
+    http = _ms_http()
+    try:
+        token, kind = _ms_access_token(account, http=http)
+        if kind == "graph":
+            try:
+                out = _fetch_graph_messages(http, token)
+                logger.debug(f"[Outlook] Microsoft Graph 直连拿到 {len(out)} 封邮件")
+                return out
+            except Exception as exc:
+                logger.warning(f"[Outlook] Microsoft Graph 读取失败，尝试 Outlook REST: {type(exc).__name__}: {exc}")
+                # 重新取 Outlook REST token
+                _MS_TOKEN_CACHE.pop(f"{account.email}|{account.client_id}|{account.refresh_token[:24]}", None)
+                token, kind = _ms_access_token(account, http=http)
+        out = _fetch_outlook_rest_messages(http, token)
+        logger.debug(f"[Outlook] Outlook REST 直连拿到 {len(out)} 封邮件")
+        return out
+    except Exception as exc:
+        logger.warning(f"[Outlook] Microsoft/Outlook 直连失败: {type(exc).__name__}: {exc}")
+        return []
+    finally:
+        http.close()
+
+
 def _fetch_via(session: CurlSession, protocol: str, account: OutlookAccount) -> list[dict]:
     """
-    调用 mail.chatai.codes 拉收件箱，返回 emails 列表。
-    protocol 取 "graph" 或 "imap"。
+    拉收件箱，返回 emails 列表。
+
+    - remote: mail.chatai.codes /api/fetch-graph|imap
+    - direct: Microsoft Graph 直连
+    - auto: 远端可用时用远端；远端 402/DEPLOYMENT_DISABLED 后自动直连 Graph
     """
+    global _REMOTE_DISABLED
+    mode = _outlook_fetch_mode()
+
+    if mode in ("direct", "graph", "graph_direct", "msgraph"):
+        if protocol == "graph":
+            return _fetch_via_graph_direct(account)
+        return []
+
+    if mode == "auto" and _REMOTE_DISABLED:
+        if protocol == "graph":
+            return _fetch_via_graph_direct(account)
+        return []
+
     url = f"{OUTLOOK_API_BASE.rstrip('/')}/api/fetch-{protocol}"
     payload = {
         "email":        account.email,
@@ -349,6 +619,11 @@ def _fetch_via(session: CurlSession, protocol: str, account: OutlookAccount) -> 
         data = _secure_post(session, url, payload)
     except OutlookClientError as exc:
         logger.warning(f"[Outlook] {protocol} 请求失败: {exc}")
+        if mode == "auto" and _is_remote_disabled_error(exc):
+            _REMOTE_DISABLED = True
+            logger.warning("[Outlook] 远端取件服务已禁用，自动切换为 Microsoft Graph 直连模式")
+            if protocol == "graph":
+                return _fetch_via_graph_direct(account)
         return []
     except Exception as exc:
         logger.warning(f"[Outlook] {protocol} 请求异常: {type(exc).__name__}: {exc}")
@@ -427,7 +702,7 @@ def fetch_latest_otp(
     session = _http_session()
 
     logger.info(
-        f"[Outlook] 开始轮询 {email} 的收件箱（双协议 graph + imap），"
+        f"[Outlook] 开始轮询 {email} 的收件箱（mode={_outlook_fetch_mode()}, graph + imap/Graph直连兜底），"
         f"最长 {max_wait or _email_cfg.OTP_MAX_WAIT}s, settle={settle}s..."
     )
 

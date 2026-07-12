@@ -7,7 +7,7 @@ RoxyBrowser 指纹浏览器自动化注册配置。
 - 所有接口请求头必须带 token
 - 可配合 Selenium / Puppeteer / Playwright 自动化
 """
-from config.env_loader import env_str
+from config.env_loader import env_str, apply_env_overrides
 
 
 # 注册驱动：
@@ -96,3 +96,6 @@ ROXY_PROFILE_CREATE_PAYLOAD: dict = {
 
 # Roxy Codex 授权等待 callback 的最长秒数
 ROXY_CODEX_CALLBACK_TIMEOUT: int = 180
+
+# ---- .env overrides for WebUI editable fields ----
+apply_env_overrides(globals(), {'REGISTRATION_DRIVER': 'str', 'ROXY_API_BASE': 'str', 'ROXY_API_TOKEN': 'str', 'ROXY_PROFILE_ID': 'str', 'ROXY_WORKSPACE_ID': 'str', 'ROXY_PROJECT_ID': 'str', 'ROXY_WORKSPACE_LIST_PATH': 'str', 'ROXY_OPEN_PATH': 'str', 'ROXY_OPEN_HEADLESS': 'bool', 'ROXY_CLOSE_PATH': 'str', 'ROXY_KEEP_BROWSER_OPEN': 'bool', 'ROXY_ONE_PROFILE_PER_ACCOUNT': 'bool', 'ROXY_DELETE_PROFILE_AFTER_RUN': 'bool', 'ROXY_CREATE_USE_PROXY_POOL': 'bool', 'ROXY_PROXY_CHECK_CHANNEL': 'str', 'ROXY_DELETE_PATH': 'str', 'ROXY_CODEX_CALLBACK_TIMEOUT': 'int'})

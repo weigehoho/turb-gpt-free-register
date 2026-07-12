@@ -10,8 +10,9 @@
 原则：同一 BrowserSession 内稳定，不同 BrowserSession 可自然分散；协议头、JS
 navigator/screen/timezone/client hints 不能互相打架。
 """
-
 from __future__ import annotations
+
+from config.env_loader import apply_env_overrides
 
 import random
 import re
@@ -246,3 +247,6 @@ def validate_browser_profile(profile: dict) -> list[str]:
         issues.append("navigator.language 不在 navigator.languages 中")
     # requestIdleCallback 是否暴露由画像决定。
     return issues
+
+# ---- .env overrides for WebUI editable fields ----
+apply_env_overrides(globals(), {'BROWSER_LOCALE_PROFILE': 'str', 'AUTO_BROWSER_LOCALE_FROM_IP': 'bool', 'IP_GEO_TIMEOUT': 'float'})

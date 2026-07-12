@@ -32,14 +32,20 @@ def env_path() -> Path:
 
 
 def load_env(*, override: bool = False) -> Path:
-    """加载项目根 .env 到进程环境。可重复调用（reload 时用 override=True）。"""
+    """加载项目根 .env 到进程环境。可重复调用（reload 时用 override=True）。
+
+    优先使用 python-dotenv；未安装时使用本文件内置的轻量 parser，避免配置读取强依赖。
+    """
     global _LOADED
     try:
         from dotenv import load_dotenv
-    except ImportError as exc:  # pragma: no cover
-        raise RuntimeError(
-            "缺少 python-dotenv。请执行: uv pip install python-dotenv --python .venv/bin/python"
-        ) from exc
+    except ImportError:  # pragma: no cover
+        if _ENV_PATH.exists():
+            for key, value in read_env_file().items():
+                if override or key not in os.environ:
+                    os.environ[key] = value
+        _LOADED = True
+        return _ENV_PATH
 
     if _ENV_PATH.exists():
         load_dotenv(dotenv_path=_ENV_PATH, override=override)
@@ -142,3 +148,78 @@ def write_env_values(updates: dict[str, str]) -> list[str]:
     # 让当前进程立刻看到新值
     load_env(override=True)
     return written
+
+
+def _coerce_env_value(raw: str, default, vtype: str | None = None):
+    if vtype is None:
+        if isinstance(default, bool):
+            vtype = "bool"
+        elif isinstance(default, int) and not isinstance(default, bool):
+            vtype = "int"
+        elif isinstance(default, float):
+            vtype = "float"
+        elif isinstance(default, (list, tuple)):
+            vtype = "list_str_multiline"
+        else:
+            vtype = "str"
+    if vtype == "bool":
+        return str(raw).strip().lower() in ("true", "1", "yes", "on", "y")
+    if vtype == "int":
+        return int(str(raw).strip())
+    if vtype == "float":
+        return float(str(raw).strip())
+    if vtype == "list_str_multiline":
+        text = str(raw)
+        # 兼容旧值：PROXY_POOL='["http://..."]'
+        try:
+            import ast
+            val = ast.literal_eval(text)
+            if isinstance(val, (list, tuple)):
+                return [str(x).strip() for x in val if str(x).strip()]
+        except Exception:
+            pass
+        return [line.strip() for line in text.splitlines() if line.strip()]
+    return str(raw).strip()
+
+
+def env_value(key: str, default=None, vtype: str | None = None):
+    ensure_loaded()
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    try:
+        return _coerce_env_value(raw, default, vtype)
+    except Exception:
+        return default
+
+
+def env_bool(key: str, default: bool = False) -> bool:
+    return bool(env_value(key, default, "bool"))
+
+
+def env_int(key: str, default: int = 0) -> int:
+    return int(env_value(key, default, "int"))
+
+
+def env_float(key: str, default: float = 0.0) -> float:
+    return float(env_value(key, default, "float"))
+
+
+def env_list(key: str, default: list[str] | None = None) -> list[str]:
+    return list(env_value(key, default or [], "list_str_multiline"))
+
+
+def apply_env_overrides(namespace: dict, schema: dict[str, str] | None = None) -> None:
+    """用 .env/环境变量覆盖模块 globals() 中的配置常量。
+
+    schema: {KEY: type}，type 支持 bool/int/float/str/list_str_multiline。
+    没传 schema 时，会对 namespace 里已有的大写常量按默认值类型推断。
+    """
+    ensure_loaded()
+    keys = schema.keys() if schema else [k for k in namespace if k.isupper()]
+    for key in keys:
+        if os.getenv(key) is None:
+            continue
+        default = namespace.get(key)
+        vtype = schema.get(key) if schema else None
+        namespace[key] = env_value(key, default, vtype)

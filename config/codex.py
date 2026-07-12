@@ -6,7 +6,7 @@
 参数来源：CLIProxyAPI 源码 internal/auth/codex/openai_auth.go + pkce.go，
 对照 https://github.com/router-for-me/CLIProxyAPI 逐行确认。
 """
-from config.env_loader import env_str
+from config.env_loader import env_str, apply_env_overrides
 
 
 # 是否启用 Codex OAuth 授权（False = 跳过，不影响注册结果）
@@ -50,7 +50,8 @@ ENABLE_CODEX_AUTO: bool = False
 # Codex OAuth 授权驱动：
 #   "protocol" = 原有 curl_cffi 协议授权
 #   "roxy"     = 调用 RoxyBrowser 指纹浏览器完成授权页面/手机验证/回调捕获
-#   "cloak"    = 调用 CloakBrowser 完成授权页面/手机验证/回调捕获
+#   "cloak"       = 调用 CloakBrowser 完成授权页面/手机验证/回调捕获
+#   "browser_use" = 调用 Browser Use Cloud 完成授权页面/手机验证/回调捕获
 #   "same_as_registration" = 跟随 REGISTRATION_DRIVER
 CODEX_OAUTH_DRIVER: str = "cloak"
 
@@ -137,3 +138,6 @@ L_ADMIN_AUTH_CODE: str = env_str("L_ADMIN_AUTH_CODE", "")
 # L 返回的号码如果不含国家码，可在这里补前缀；例如美国本地 10 位号填 "1"。
 # 留空则直接使用 L 返回的 item.phone。
 L_PHONE_PREFIX: str = "-"
+
+# ---- .env overrides for WebUI editable fields ----
+apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_API_KEY': 'str', 'L_API_BASE': 'str', 'L_ADMIN_AUTH_CODE': 'str', 'L_PHONE_PREFIX': 'str'})

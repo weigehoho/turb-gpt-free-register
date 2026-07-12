@@ -9,6 +9,7 @@
     - socks5://            SOCKS5（DNS 本地解析，可能泄漏）
     - socks5h://           SOCKS5（DNS 在代理端解析，推荐，避免 DNS-IP 错配）
 """
+from config.env_loader import apply_env_overrides
 import random
 
 
@@ -25,4 +26,8 @@ def pick_proxy() -> str:
 
 
 # 兼容入口：默认每次进程启动随机选一个，作为本次注册全程的固定代理
+PROXY = pick_proxy()
+
+# ---- .env overrides for WebUI editable fields ----
+apply_env_overrides(globals(), {'PROXY_POOL': 'list_str_multiline'})
 PROXY = pick_proxy()

@@ -58,6 +58,7 @@ EMAIL_SOURCE = "outlook,generic_api"
   - `CODEX_OAUTH_DRIVER = "protocol"`
   - `CODEX_OAUTH_DRIVER = "roxy"`
   - `CODEX_OAUTH_DRIVER = "cloak"`
+  - `CODEX_OAUTH_DRIVER = "browser_use"`
   - `CODEX_OAUTH_DRIVER = "same_as_registration"`
 - 支持 CPA 管理接口生成授权 URL，并提交 OAuth callback。
 - 支持接码平台：
@@ -215,7 +216,7 @@ REGISTRATION_DRIVER = "cloak"
 
 ```python
 CODEX_OAUTH_DRIVER = "same_as_registration"  # 跟随注册驱动
-# 或单独指定："protocol" / "roxy" / "cloak"
+# 或单独指定："protocol" / "roxy" / "cloak" / "browser_use"
 ```
 
 CloakBrowser 专用配置在 `config/cloakbrowser.py`：
@@ -258,6 +259,16 @@ REGISTRATION_DRIVER = "browser_use"
 BROWSER_USE_API_KEY = "你的 Browser Use API Key"
 BROWSER_USE_PROXY_COUNTRY_CODE = "jp"   # 可选：us/sg/de...
 BROWSER_USE_USE_PROXY = True
+BROWSER_USE_FAST_MODE = True       # 推荐开启：减少 Browser Use 额外等待
+BROWSER_USE_LOG_TIMING = True      # 输出阶段耗时日志，方便定位慢点
+```
+
+如希望注册成功后也用 Browser Use 自动跑 Codex OAuth：
+
+```python
+ENABLE_CODEX_AUTO = True
+CODEX_OAUTH_DRIVER = "browser_use"
+# 或 CODEX_OAUTH_DRIVER = "same_as_registration"，当 REGISTRATION_DRIVER="browser_use" 时自动跟随
 ```
 
 依赖：
@@ -271,7 +282,8 @@ pip install playwright
 说明：
 
 - Browser Use 走远端 stealth Chromium，通过 Playwright `connect_over_cdp` 控制。
-- 默认跳过 Codex 手机验证闭环（避免卡在 SMS）；注册成功后可再补跑。
+- `BROWSER_USE_FAST_MODE=True` 会跳过大部分人工节奏等待；`BROWSER_USE_LOG_TIMING=True` 会打印连接、打开页面、邮箱、OTP、手机、callback 等阶段耗时。
+- 支持作为 Codex OAuth 授权驱动：`CODEX_OAUTH_DRIVER="browser_use"`，可完成授权页面、邮箱 OTP、手机短信验证与 callback 捕获。
 - 适合不想安装本机 Roxy、又想要 session 隔离 + 云端代理的场景。
 - 免费额度/并发以 Browser Use 官方定价页为准。
 
@@ -304,7 +316,7 @@ ENABLE_CODEX_AUTO = False
 ```python
 ENABLE_CODEX_AUTO = True
 # config/codex.py
-CODEX_OAUTH_DRIVER = "roxy"  # 可选 protocol / roxy / cloak / same_as_registration
+CODEX_OAUTH_DRIVER = "browser_use"  # 可选 protocol / roxy / cloak / browser_use / same_as_registration
 ```
 
 接码配置在 `config/codex.py`：
@@ -672,6 +684,7 @@ ROXY_OPEN_HEADLESS = False
 - [LINUX DO](https://linux.do) — 社区交流与用户反馈
 - [RoxyBrowser](https://roxybrowser.cn/invite/NvH4Jx) — 免费提供 5 个窗口
 - [CloakBrowser](https://github.com/CloakHQ/CloakBrowser) — Stealth Chromium / Playwright 自动化指纹浏览器支持
+- [browser-use](https://github.com/browser-use/browser-use) — Browser Use Cloud / Playwright CDP 云端浏览器能力支持
 - [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) — Codex OAuth 凭证格式参考
 - [curl_cffi](https://github.com/yifeikong/curl_cffi) — 底层 HTTP 库，提供 TLS 指纹 impersonate 能力
 

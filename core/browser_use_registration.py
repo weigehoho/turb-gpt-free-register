@@ -14,6 +14,7 @@ import logging
 import random
 import string
 import time
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,45 @@ from core.email_provider import resolve_email_source, wait_for_otp
 from core.humanize import delay as human_delay
 
 logger = logging.getLogger(__name__)
+
+
+
+def _fast_mode() -> bool:
+    return bool(getattr(_cfg, "BROWSER_USE_FAST_MODE", True))
+
+
+def _log_timing_enabled() -> bool:
+    return bool(getattr(_cfg, "BROWSER_USE_LOG_TIMING", True))
+
+
+def _bu_delay(kind: str, seconds: float | None = None) -> None:
+    if _fast_mode():
+        if seconds is None:
+            seconds = {
+                "navigate": 0.2,
+                "form": 0.12,
+                "otp_input": 0.15,
+                "api": 0.15,
+                "post_auth": 0.2,
+            }.get(kind, 0.1)
+        if seconds > 0:
+            time.sleep(seconds)
+        return
+    human_delay(kind)
+
+
+class _StepTimer:
+    def __init__(self, label: str):
+        self.label = label
+        self.t0 = time.perf_counter()
+        if _log_timing_enabled():
+            logger.info("[BrowserUse][耗时] %s 开始", label)
+
+    def done(self, extra: str = "") -> None:
+        if _log_timing_enabled():
+            cost = time.perf_counter() - self.t0
+            logger.info("[BrowserUse][耗时] %s 完成 %.2fs%s", self.label, cost, (" " + extra) if extra else "")
+
 
 
 def _check_manual_stop() -> None:
@@ -118,7 +158,7 @@ def _fill_first(page, selectors: list[str], value: str, timeout_ms: int | None =
                     return True
                 except Exception as exc2:
                     last_err = exc2
-        time.sleep(0.3)
+        time.sleep(0.15 if _fast_mode() else 0.3)
     if last_err:
         logger.debug("[BrowserUse] fill failed: %s", last_err)
     return False
@@ -139,7 +179,7 @@ def _click_first(page, selectors: list[str], timeout_ms: int | None = None) -> b
                     return True
                 except Exception:
                     pass
-        time.sleep(0.3)
+        time.sleep(0.15 if _fast_mode() else 0.3)
     return False
 
 
@@ -179,8 +219,17 @@ def _type_email(page, email: str) -> None:
             "button[data-provider='email']",
             "button:has-text('Continue with email')",
             "button:has-text('Sign up with email')",
+            "button:has-text('Log in with email')",
+            "button:has-text('Email')",
+            "button:has-text('メールで続行')",
+            "button:has-text('メールアドレスで続行')",
+            "button:has-text('メール')",
             "button:has-text('使用邮箱')",
+            "button:has-text('使用電子郵件')",
+            "button:has-text('邮箱')",
+            "button:has-text('電子郵件')",
             "a:has-text('Continue with email')",
+            "a:has-text('メールで続行')",
         ],
         timeout_ms=4000,
     )
@@ -192,10 +241,20 @@ def _type_email(page, email: str) -> None:
             "input[type='email']",
             "input[name='email']",
             "input[name='username']",
+            "input[name='loginfmt']",
+            "input[name='identifier']",
             "input[autocomplete='email']",
+            "input[autocomplete='username']",
+            "input[inputmode='email']",
             "input[id*='email' i]",
+            "input[id*='username' i]",
+            "input[aria-label*='email' i]",
+            "input[aria-label*='メール']",
+            "input[aria-label*='邮箱']",
             "input[placeholder*='email' i]",
+            "input[placeholder*='メール']",
             "input[placeholder*='邮箱']",
+            "input[placeholder*='電子郵件']",
         ],
         email,
         timeout_ms=_timeout_ms(),
@@ -210,6 +269,10 @@ def _type_email(page, email: str) -> None:
             "input[type='submit']",
             "button:has-text('Continue')",
             "button:has-text('Next')",
+            "button:has-text('Submit')",
+            "button:has-text('続行')",
+            "button:has-text('次へ')",
+            "button:has-text('送信')",
             "button:has-text('继续')",
             "button:has-text('下一步')",
             "form button",
@@ -218,7 +281,7 @@ def _type_email(page, email: str) -> None:
     ):
         # 回车提交
         page.keyboard.press("Enter")
-    human_delay("form")
+    _bu_delay("form")
 
 
 def _is_password_page(page) -> bool:
@@ -263,7 +326,7 @@ def _fill_password_if_present(page, email: str, timeout: int = 25) -> str | None
         if _is_email_verification_page(page):
             return None
         if not _is_password_page(page):
-            time.sleep(0.4)
+            time.sleep(0.15 if _fast_mode() else 0.4)
             continue
         password = _registration_password()
         logger.info("[BrowserUse] 检测到密码页，设置密码（%s 位）：%s", len(password), email)
@@ -293,7 +356,7 @@ def _fill_password_if_present(page, email: str, timeout: int = 25) -> str | None
             timeout_ms=8000,
         ):
             page.keyboard.press("Enter")
-        human_delay("form")
+        _bu_delay("form")
         return password
     return None
 
@@ -401,7 +464,7 @@ def _wait_after_otp(page, timeout: int = 12) -> str:
             return "invalid"
         if "chatgpt.com" in url and "auth" not in url:
             return "accepted"
-        time.sleep(0.5)
+        time.sleep(0.25 if _fast_mode() else 0.5)
     return "unknown"
 
 
@@ -470,120 +533,492 @@ def _fill_birthday_fields(page, birthday: str) -> None:
                 pass
 
 
+
+def _profile_diagnostics(page) -> dict:
+    try:
+        return page.evaluate(
+            r"""
+            () => {
+              const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+                && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+              const inputs = [...document.querySelectorAll('input,textarea,select')].map(el => ({
+                tag: el.tagName, type: el.getAttribute('type') || '', name: el.getAttribute('name') || '', id: el.id || '',
+                placeholder: el.getAttribute('placeholder') || '', aria: el.getAttribute('aria-label') || '',
+                value: el.type === 'password' ? '<password>' : (el.value || ''), visible: visible(el), disabled: !!el.disabled,
+              })).slice(0, 60);
+              const buttons = [...document.querySelectorAll('button,input[type="submit"],[role="button"]')].map(el => ({
+                tag: el.tagName, type: el.getAttribute('type') || '', text: (el.innerText || el.textContent || el.value || '').trim().slice(0,80),
+                disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true', visible: visible(el),
+              })).slice(0, 30);
+              return {url: location.href, title: document.title, inputs, buttons, body: (document.body?.innerText || '').slice(0,500)};
+            }
+            """
+        ) or {"url": _page_url(page)}
+    except Exception as exc:
+        return {"url": _page_url(page), "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _has_chatgpt_access_token(page) -> bool:
+    try:
+        if "chatgpt.com" not in _page_url(page).lower():
+            return False
+        data = page.evaluate(
+            """async () => {
+              const r = await fetch('/api/auth/session', {credentials:'include'});
+              return await r.json();
+            }"""
+        )
+        return bool(isinstance(data, dict) and data.get("accessToken"))
+    except Exception:
+        return False
+
+
+def _fill_spinbutton_birthday(page, birthday: str) -> bool:
+    """Playwright 兜底填写 React Aria spinbutton 年/月/日。"""
+    try:
+        y, m, d = birthday.split("-")
+    except Exception:
+        return False
+    ok = False
+    for selector, value in [
+        ('[role="spinbutton"][data-type="year"]', y),
+        ('[role="spinbutton"][data-type="month"]', str(int(m)).zfill(2)),
+        ('[role="spinbutton"][data-type="day"]', str(int(d)).zfill(2)),
+    ]:
+        try:
+            loc = page.locator(selector).first
+            if loc.count() <= 0:
+                continue
+            loc.scroll_into_view_if_needed(timeout=1500)
+            loc.click(timeout=1500)
+            page.keyboard.press("Meta+A")
+            page.keyboard.type(str(value), delay=10 if _fast_mode() else 40)
+            loc.evaluate("el => { el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); el.blur?.(); }")
+            ok = True
+        except Exception:
+            try:
+                page.keyboard.press("Control+A")
+                page.keyboard.type(str(value), delay=10 if _fast_mode() else 40)
+                ok = True
+            except Exception:
+                pass
+    if ok:
+        try:
+            page.evaluate(
+                r"""(birthday) => {
+                  const hidden = document.querySelector('input[name="birthday"], input[name="birthdate"]');
+                  if (hidden) {
+                    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+                    if (setter) setter.call(hidden, birthday); else hidden.value = birthday;
+                    hidden.dispatchEvent(new Event('input', {bubbles:true}));
+                    hidden.dispatchEvent(new Event('change', {bubbles:true}));
+                  }
+                }""",
+                birthday,
+            )
+        except Exception:
+            pass
+    return ok
+
+
+def _js_complete_profile(page, name: str, birthday: str) -> dict:
+    """JS 兜底处理 about-you/profile：填 name/age/生日/checkbox 并提交。"""
+    try:
+        year, month, day = [int(x) for x in birthday.split("-")]
+    except Exception:
+        year, month, day = 1995, 1, 1
+    today = date.today()
+    age = max(18, min(60, today.year - year - ((today.month, today.day) < (month, day))))
+    script = r"""
+    ({name, birthday, year, month, day, age}) => {
+      const month2 = String(month).padStart(2, '0');
+      const day2 = String(day).padStart(2, '0');
+      const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+        && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
+        && !el.disabled && !el.readOnly;
+      const setValue = (el, value) => {
+        if (!el) return false;
+        try { el.scrollIntoView?.({block:'center'}); el.focus?.(); } catch(e) {}
+        const tag = (el.tagName || '').toLowerCase();
+        const proto = tag === 'textarea' ? HTMLTextAreaElement.prototype
+          : tag === 'select' ? HTMLSelectElement.prototype
+          : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        if (setter) setter.call(el, String(value)); else el.value = String(value);
+        if (tag === 'select') {
+          [...el.options].forEach(opt => { opt.selected = String(opt.value) === String(value) || String(opt.textContent || '').trim() === String(value); });
+        }
+        el.dispatchEvent(new Event('input', {bubbles:true}));
+        el.dispatchEvent(new Event('change', {bubbles:true}));
+        try { el.blur?.(); } catch(e) {}
+        return true;
+      };
+      const hay = el => [el.name, el.id, el.placeholder, el.getAttribute('aria-label'), el.autocomplete, el.getAttribute('data-testid')].join(' ').toLowerCase();
+      const allInputs = [...document.querySelectorAll('input, textarea')].filter(visible);
+      const filled = {};
+
+      const nameInput = allInputs.find(el => /(name|full.?name|user.?name|名前|氏名|姓名)/i.test(hay(el)) && !/(month|day|year|age|birth|code|email|phone|password)/i.test(hay(el)))
+        || allInputs.find(el => ['text',''].includes((el.type||'').toLowerCase()) && !/(code|email|phone|tel|number|password|month|day|year|age|birth)/i.test(hay(el)));
+      if (nameInput) filled.name = setValue(nameInput, name);
+
+      const firstLast = name.split(/\s+/, 2);
+      const firstInput = allInputs.find(el => /(first.?name|given)/i.test(hay(el)));
+      const lastInput = allInputs.find(el => /(last.?name|family|surname)/i.test(hay(el)));
+      if (!filled.name && firstInput) filled.firstName = setValue(firstInput, firstLast[0] || name);
+      if (lastInput) filled.lastName = setValue(lastInput, firstLast[1] || 'User');
+
+      const ageInput = allInputs.find(el => /(age|年齢|年龄)/i.test(hay(el)) || ((el.type||'').toLowerCase()==='number' && !/(day|month|year)/i.test(hay(el))));
+      if (ageInput) filled.age = setValue(ageInput, age);
+
+      const dateInput = [...document.querySelectorAll('input[name="birthdate"], input[type="date"], input[name="birthday"]')]
+        .find(el => visible(el) || String(el.getAttribute('type') || '').toLowerCase() === 'date');
+      if (dateInput) filled.birthdate = setValue(dateInput, birthday);
+
+      const setFirst = (selectors, values, key) => {
+        for (const sel of selectors) for (const el of [...document.querySelectorAll(sel)]) {
+          if (!visible(el)) continue;
+          for (const val of values) {
+            if ((el.tagName || '').toLowerCase() === 'select') {
+              const has = [...el.options].some(o => String(o.value) === String(val) || String(o.textContent || '').trim() === String(val));
+              if (!has) continue;
+            }
+            if (setValue(el, val)) { filled[key] = val; return true; }
+          }
+        }
+        return false;
+      };
+      const yOk = setFirst(['select[name="year"]','input[name="year"]','select[id*="year"]','input[id*="year"]','input[aria-label*="year" i]'], [year], 'year');
+      const mOk = setFirst(['select[name="month"]','input[name="month"]','select[id*="month"]','input[id*="month"]','input[aria-label*="month" i]'], [month, month2], 'month');
+      const dOk = setFirst(['select[name="day"]','input[name="day"]','select[id*="day"]','input[id*="day"]','input[aria-label*="day" i]'], [day, day2], 'day');
+      if (yOk && mOk && dOk) {
+        const hidden = document.querySelector('input[name="birthday"],input[name="birthdate"]');
+        if (hidden) setValue(hidden, birthday);
+        filled.ymd = true;
+      }
+
+      // React Aria hidden native select：按 option 范围推断年/月/日，不依赖文字。
+      const selects = [...document.querySelectorAll('[data-testid="hidden-select-container"] select, .react-aria-Select select, select')]
+        .filter(el => !el.disabled);
+      const nums = sel => [...sel.options].map(o => Number(o.value)).filter(Number.isFinite);
+      const maxNum = sel => Math.max(...nums(sel), -Infinity);
+      const minNum = sel => Math.min(...nums(sel), Infinity);
+      const hasOption = (sel, val) => [...sel.options].some(o => String(o.value) === String(val));
+      const yearSelects = selects.filter(sel => hasOption(sel, year) && maxNum(sel) > 1900);
+      const smallSelects = selects.filter(sel => !yearSelects.includes(sel));
+      const monthSelects = smallSelects.filter(sel => (hasOption(sel, month) || hasOption(sel, month2)) && minNum(sel) <= 1 && maxNum(sel) <= 12);
+      const daySelects = smallSelects.filter(sel => (hasOption(sel, day) || hasOption(sel, day2)) && maxNum(sel) >= 28);
+      let birthMode = filled.age ? 'age' : (filled.birthdate ? 'birthdate' : (filled.ymd ? 'ymd' : null));
+      if (!birthMode && yearSelects.length && monthSelects.length && daySelects.length) {
+        const ys = yearSelects[0];
+        const ms = monthSelects[0];
+        const ds = daySelects.find(x => x !== ms) || daySelects[0];
+        setValue(ys, year);
+        setValue(ms, hasOption(ms, month) ? month : month2);
+        setValue(ds, hasOption(ds, day) ? day : day2);
+        const hidden = document.querySelector('input[name="birthday"],input[name="birthdate"]');
+        if (hidden) setValue(hidden, birthday);
+        filled.reactSelect = true;
+        birthMode = 'react_select';
+      }
+      if (!birthMode && document.querySelector('[role="spinbutton"][data-type="year"]')) birthMode = 'spinbutton_needed';
+
+      const isChecked = el => el.checked === true || String(el.getAttribute('aria-checked') || el.closest('[role="checkbox"]')?.getAttribute('aria-checked') || '').toLowerCase() === 'true';
+      const mark = el => {
+        if (!el || isChecked(el)) return false;
+        const label = el.closest('label');
+        try { (label && visible(label) ? label : el).scrollIntoView({block:'center'}); (label && visible(label) ? label : el).click(); } catch(e) {}
+        if (!isChecked(el)) {
+          const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set;
+          if (setter) setter.call(el, true); else el.checked = true;
+          el.dispatchEvent(new MouseEvent('click', {bubbles:true}));
+          el.dispatchEvent(new Event('input', {bubbles:true}));
+          el.dispatchEvent(new Event('change', {bubbles:true}));
+        }
+        return isChecked(el);
+      };
+      let checkboxCount = 0;
+      for (const box of [...document.querySelectorAll('input[type="checkbox"]')].filter(el => visible(el) || visible(el.closest('label')))) {
+        if (mark(box)) checkboxCount += 1;
+      }
+
+      const clickSubmit = () => {
+        const forms = [...document.querySelectorAll('form')].filter(el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+        for (const form of forms) {
+          const submit = form.querySelector('button[type="submit"], input[type="submit"]');
+          if (submit && visible(submit) && !submit.disabled && submit.getAttribute('aria-disabled') !== 'true') {
+            submit.scrollIntoView({block:'center'}); submit.click(); return {clicked:true, method:'form_submit_button', text:(submit.innerText||submit.value||'').trim()};
+          }
+        }
+        const buttons = [...document.querySelectorAll('button,input[type="submit"],[role="button"]')].filter(visible);
+        const scored = buttons.map((el, idx) => {
+          const t = [el.innerText, el.textContent, el.value, el.getAttribute('aria-label'), el.type].join(' ').toLowerCase();
+          let score = 0;
+          if (el.disabled || el.getAttribute('aria-disabled') === 'true') score = -100;
+          else if ((el.type || '').toLowerCase() === 'submit') score = 95;
+          else if (/(continue|next|done|submit|create|start|続行|次へ|完了|送信|開始|继续|下一步|完成|提交)/i.test(t)) score = 90;
+          else if (buttons.length === 1) score = 50;
+          return {el, idx, score, text:(el.innerText||el.textContent||el.value||'').trim()};
+        }).filter(x => x.score > 0).sort((a,b) => b.score - a.score || a.idx - b.idx);
+        if (scored.length) { scored[0].el.scrollIntoView({block:'center'}); scored[0].el.click(); return {clicked:true, method:'button', text:scored[0].text}; }
+        for (const form of forms) {
+          if (typeof form.requestSubmit === 'function') { form.requestSubmit(); return {clicked:true, method:'requestSubmit'}; }
+        }
+        return {clicked:false, method:'none'};
+      };
+      const submit = clickSubmit();
+      return {
+        ok: Boolean((filled.name || filled.firstName) && birthMode),
+        submitted: submit.clicked,
+        method: submit.method,
+        buttonText: submit.text || '',
+        birthMode,
+        checkboxCount,
+        filled,
+        url: location.href,
+        buttons: [...document.querySelectorAll('button,input[type="submit"],[role="button"]')].map(el => ({text:(el.innerText||el.textContent||el.value||'').trim().slice(0,80), disabled:!!el.disabled || el.getAttribute('aria-disabled')==='true'})).slice(0,10),
+      };
+    }
+    """
+    try:
+        return page.evaluate(script, {"name": name, "birthday": birthday, "year": year, "month": month, "day": day, "age": age}) or {}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "url": _page_url(page)}
+
+
 def _complete_profile_page(page, name: str, birthday: str, timeout: int = 60) -> bool:
+    # fast mode 也必须等资料页真正离开；不能未提交成功就主动打开 chatgpt.com。
+    timeout = min(timeout, 45) if _fast_mode() else timeout
     end = time.time() + timeout
     submitted = False
+    last_submit = 0.0
+    last_log = 0.0
+    last_info: dict[str, Any] = {}
+    last_diag: dict[str, Any] = {}
     while time.time() < end:
         _check_manual_stop()
         url = _page_url(page).lower()
         if "chatgpt.com" in url and "auth.openai.com" not in url and "about-you" not in url:
+            logger.info("[BrowserUse] 已离开资料页并进入 ChatGPT：%s", _page_url(page))
             return True
-        looks_profile = any(x in url for x in ("about-you", "profile", "create-account/about", "signup/profile"))
-        name_loc = _visible_locator(
-            page,
-            [
-                "input[name='name']",
-                "input[autocomplete='name']",
-                "input[name='full_name']",
-                "input[name='username']",
-                "input[placeholder*='name' i]",
-                "input[aria-label*='name' i]",
-            ],
-            timeout_ms=500,
-        )
-        if looks_profile or name_loc is not None:
-            logger.info("[BrowserUse] 资料页：填写昵称/生日")
-            if name_loc is not None:
-                try:
-                    name_loc.fill(name)
-                except Exception:
-                    _fill_first(page, ["input[name='name']", "input[autocomplete='name']"], name, timeout_ms=3000)
-            else:
-                _fill_first(
-                    page,
-                    [
-                        "input[name='name']",
-                        "input[autocomplete='name']",
-                        "input[name='full_name']",
-                        "input[placeholder*='name' i]",
-                    ],
-                    name,
-                    timeout_ms=3000,
-                )
-            _fill_birthday_fields(page, birthday)
-            # 同意协议勾选（若有）
-            try:
-                checks = page.locator("input[type='checkbox']")
-                for i in range(min(checks.count(), 6)):
-                    box = checks.nth(i)
-                    if box.is_visible() and not box.is_checked():
-                        box.check(force=True)
-            except Exception:
-                pass
-            if _click_first(
-                page,
-                [
-                    "button[type='submit']",
-                    "button:has-text('Continue')",
-                    "button:has-text('Next')",
-                    "button:has-text('Done')",
-                    "button:has-text('继续')",
-                    "button:has-text('完成')",
-                    "form button",
-                ],
-                timeout_ms=5000,
-            ):
-                submitted = True
-                human_delay("form")
-                time.sleep(1.0)
-                continue
-        time.sleep(0.6)
+        if _has_chatgpt_access_token(page):
+            logger.info("[BrowserUse] 资料页阶段已检测到 accessToken")
+            return False
+
+        body = ""
+        try:
+            body = (page.locator("body").inner_text(timeout=800) or "").lower()
+        except Exception:
+            pass
+        looks_profile = any(x in url for x in ("about-you", "profile", "create-account/about", "signup/profile")) or any(x in body for x in ("birthday", "birth", "age", "name", "誕生日", "年齢", "名前", "生日", "年龄", "姓名"))
+
+        if looks_profile:
+            if not submitted or time.time() - last_submit > 3:
+                logger.info("[BrowserUse] 资料页：填写/提交昵称生日 url=%s", _page_url(page) or "-")
+                info = _js_complete_profile(page, name, birthday)
+                if info.get("birthMode") == "spinbutton_needed":
+                    spin_ok = _fill_spinbutton_birthday(page, birthday)
+                    logger.info("[BrowserUse] 资料页 spinbutton 生日填写：%s", spin_ok)
+                    info = _js_complete_profile(page, name, birthday)
+                last_info = info
+                logger.info("[BrowserUse] 资料页 JS 提交结果：%s", str(info)[:900])
+                submitted = bool(info.get("submitted") or submitted)
+                last_submit = time.time()
+                _bu_delay("form")
+            elif time.time() - last_log > 2:
+                logger.info("[BrowserUse] 资料页已提交，等待跳转：url=%s", _page_url(page) or "-")
+                last_log = time.time()
+            time.sleep(0.35 if _fast_mode() else 0.8)
+            continue
+
+        if submitted:
+            if time.time() - last_log > 2:
+                logger.info("[BrowserUse] 资料页已提交，等待跳转/登录态同步：url=%s", _page_url(page) or "-")
+                last_log = time.time()
+            time.sleep(0.35 if _fast_mode() else 0.8)
+            continue
+
+        if time.time() - last_log > 2:
+            logger.info("[BrowserUse] 等待资料页/登录态：url=%s", _page_url(page) or "-")
+            last_log = time.time()
+        time.sleep(0.25 if _fast_mode() else 0.6)
+
+    url = _page_url(page).lower()
+    if any(x in url for x in ("about-you", "profile", "create-account/about", "signup/profile")):
+        last_diag = _profile_diagnostics(page)
+        raise RuntimeError(f"资料页提交后仍未跳转，停止读取 session 以免误判；last_info={str(last_info)[:900]} diag={str(last_diag)[:1200]}")
     return submitted
 
 
-def _fetch_chatgpt_session(page, timeout: int = 120) -> dict:
+
+def _is_target_closed_error(exc: Exception | str) -> bool:
+    text = str(exc).lower()
+    return any(x in text for x in ("targetclosed", "target page", "context or browser has been closed", "browser has been closed"))
+
+
+def _pick_live_page(context, preferred=None):
+    """Browser Use 远端有时会关闭当前 target；尽量切到同 context 的可用页面。"""
+    try:
+        if preferred is not None and not preferred.is_closed():
+            return preferred
+    except Exception:
+        pass
+    try:
+        for p in list(context.pages):
+            try:
+                if not p.is_closed():
+                    return p
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def _read_chatgpt_session_via_context(context, timeout_ms: int = 5000) -> dict | None:
+    """用 BrowserContext.request 读取 session；共享 context cookie，不依赖页面 evaluate。"""
+    try:
+        resp = context.request.get(
+            "https://chatgpt.com/api/auth/session",
+            timeout=timeout_ms,
+            headers={
+                "accept": "application/json",
+                "referer": "https://chatgpt.com/",
+                "cache-control": "no-cache",
+            },
+        )
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"status": resp.status, "text": (resp.text() or "")[:500]}
+        if isinstance(data, dict):
+            data.setdefault("_http_status", resp.status)
+        return data
+    except Exception as exc:
+        return {"_error": f"{type(exc).__name__}: {exc}"}
+
+
+def _read_chatgpt_session_via_page(page, timeout_ms: int = 5000) -> dict | None:
+    """页面内读取 session，加 JS AbortController，避免 page.evaluate 无限挂住。"""
+    try:
+        page.set_default_timeout(max(2000, timeout_ms + 1000))
+    except Exception:
+        pass
+    try:
+        return page.evaluate(
+            """async ({timeoutMs}) => {
+              const ctrl = new AbortController();
+              const timer = setTimeout(() => ctrl.abort('session-timeout'), timeoutMs);
+              try {
+                const r = await fetch('/api/auth/session', {
+                  credentials: 'include',
+                  cache: 'no-store',
+                  headers: {'accept': 'application/json'},
+                  signal: ctrl.signal,
+                });
+                const j = await r.json().catch(async () => ({text: await r.text()}));
+                if (j && typeof j === 'object') j._http_status = r.status;
+                return j;
+              } finally {
+                clearTimeout(timer);
+              }
+            }""",
+            {"timeoutMs": timeout_ms},
+        )
+    except Exception as exc:
+        return {"_error": f"{type(exc).__name__}: {exc}"}
+
+def _fetch_chatgpt_session(page, context=None, timeout: int = 120) -> dict:
+    # 优先用 BrowserContext.request 读取 cookies/session，避免 page.evaluate 在 Browser Use 远端 target 上挂死。
+    timeout = min(timeout, 28) if _fast_mode() else timeout
     end = time.time() + timeout
     last = None
-    navigated = False
+    proactive_opened = False
+    first_not_chatgpt_at: float | None = None
+    last_log = 0.0
+    target_closed_count = 0
+
+    if context is None:
+        try:
+            context = page.context
+        except Exception:
+            context = None
+
     while time.time() < end:
         _check_manual_stop()
-        url = _page_url(page).lower()
-        if "chatgpt.com" not in url:
-            time.sleep(1.5)
-            continue
-        navigated = True
-        try:
-            data = page.evaluate(
-                """async () => {
-                  const r = await fetch('/api/auth/session', {credentials: 'include'});
-                  return await r.json();
-                }"""
-            )
-            last = data
-            if isinstance(data, dict) and data.get("accessToken"):
-                logger.info("[BrowserUse] /api/auth/session 已返回 accessToken")
-                return data
-            logger.info("[BrowserUse] 等待 accessToken，keys=%s", list((data or {}).keys()) if isinstance(data, dict) else type(data))
-        except Exception as exc:
-            last = f"{type(exc).__name__}: {exc}"
-        time.sleep(2)
+        if context is not None:
+            live = _pick_live_page(context, page)
+            if live is not None and live is not page:
+                logger.info("[BrowserUse] 当前 page 已关闭/不可用，切换到同 context 可用页面：url=%s", _page_url(live) or "-")
+                page = live
 
-    if not navigated:
-        logger.info("[BrowserUse] 未自动跳转 chatgpt.com，主动打开并读取 session")
-        page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=_timeout_ms(getattr(_cfg, "BROWSER_USE_NAVIGATION_TIMEOUT", 90)))
-        time.sleep(4)
-        try:
-            data = page.evaluate(
-                """async () => {
-                  const r = await fetch('/api/auth/session', {credentials: 'include'});
-                  return await r.json();
-                }"""
-            )
-            if isinstance(data, dict) and data.get("accessToken"):
-                return data
+        url = _page_url(page).lower() if page is not None else ""
+        on_chatgpt = "chatgpt.com" in url
+
+        # 1) context.request 先读：快、不依赖页面 JS；即使页面 target 被关闭，只要 context 活着还能读。
+        if context is not None:
+            data = _read_chatgpt_session_via_context(context, timeout_ms=4500 if _fast_mode() else 9000)
             last = data
-        except Exception as exc:
-            last = f"{type(exc).__name__}: {exc}"
+            if isinstance(data, dict) and data.get("accessToken"):
+                logger.info("[BrowserUse] /api/auth/session 已返回 accessToken via=context url=%s", _page_url(page) or "-")
+                return data
+            err = str((data or {}).get("_error") or "") if isinstance(data, dict) else ""
+            if err and _is_target_closed_error(err):
+                target_closed_count += 1
+                if target_closed_count >= 2:
+                    raise RuntimeError(f"BrowserUse context/page 已关闭，无法读取 session：{err}")
+            if time.time() - last_log > 2:
+                keys = list((data or {}).keys()) if isinstance(data, dict) else type(data)
+                logger.info("[BrowserUse] 等待 accessToken via=context，url=%s keys=%s", _page_url(page) or "-", keys)
+                last_log = time.time()
+
+        # 2) 如果已经在 chatgpt.com，再用页面内 fetch 兜底；但设置短超时。
+        if on_chatgpt and page is not None:
+            data = _read_chatgpt_session_via_page(page, timeout_ms=4500 if _fast_mode() else 9000)
+            last = data
+            if isinstance(data, dict) and data.get("accessToken"):
+                logger.info("[BrowserUse] /api/auth/session 已返回 accessToken via=page url=%s", _page_url(page) or "-")
+                return data
+            err = str((data or {}).get("_error") or "") if isinstance(data, dict) else ""
+            if err and _is_target_closed_error(err):
+                target_closed_count += 1
+                logger.warning("[BrowserUse] 页面 target 已关闭，尝试继续用 context 读取 session：%s", err[:180])
+                if context is None or _pick_live_page(context) is None:
+                    # 不再等到总超时；BrowserUse 远端目标没了，继续等没有意义。
+                    raise RuntimeError(f"BrowserUse 页面已关闭，无法读取 session：{err}")
+            elif time.time() - last_log > 2:
+                keys = list((data or {}).keys()) if isinstance(data, dict) else type(data)
+                logger.info("[BrowserUse] 等待 accessToken via=page，url=%s keys=%s", _page_url(page) or "-", keys)
+                last_log = time.time()
+        else:
+            # 仍在 auth about-you/profile 时不能主动跳 chatgpt.com，否则资料未提交会拿不到 accessToken。
+            if any(x in url for x in ("about-you", "profile", "create-account/about", "signup/profile")):
+                if time.time() - last_log > 2:
+                    logger.info("[BrowserUse] 仍在资料页，等待提交跳转，不主动打开 chatgpt.com：url=%s", _page_url(page) or "-")
+                    last_log = time.time()
+                time.sleep(0.4 if _fast_mode() else 1.0)
+                continue
+            if first_not_chatgpt_at is None:
+                first_not_chatgpt_at = time.time()
+            wait_before_open = 2.0 if _fast_mode() else 8.0
+            if page is not None and _fast_mode() and not proactive_opened and time.time() - first_not_chatgpt_at >= wait_before_open:
+                logger.info("[BrowserUse] 未快速自动跳转 chatgpt.com，主动打开首页读取 session：current=%s", _page_url(page) or "-")
+                try:
+                    page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=_timeout_ms(getattr(_cfg, "BROWSER_USE_NAVIGATION_TIMEOUT", 90)))
+                    proactive_opened = True
+                    _bu_delay("navigate")
+                    continue
+                except Exception as exc:
+                    last = f"goto_chatgpt_failed {type(exc).__name__}: {exc}"
+                    if _is_target_closed_error(exc):
+                        target_closed_count += 1
+                        if context is None or _pick_live_page(context) is None:
+                            raise RuntimeError(f"BrowserUse 页面已关闭，无法主动打开 ChatGPT：{last}")
+            if time.time() - last_log > 2:
+                logger.info("[BrowserUse] 等待进入 chatgpt.com 或登录态同步：url=%s", _page_url(page) or "-")
+                last_log = time.time()
+
+        time.sleep(0.45 if _fast_mode() else 2)
+
     raise RuntimeError(f"等待 /api/auth/session accessToken 超时，最后响应: {str(last)[:800]}")
 
 
@@ -603,6 +1038,7 @@ def run_browser_use_registration(
             "缺少 playwright。请先执行: uv pip install playwright --python .venv/bin/python"
         ) from exc
 
+    _t_all = _StepTimer("BrowserUse 注册全流程")
     client = BrowserUseClient()
     session_info_open = client.open_session()
     create_acknowledged = False
@@ -622,7 +1058,9 @@ def run_browser_use_registration(
     try:
         with sync_playwright() as p:
             logger.info("[BrowserUse] 连接 CDP ...")
+            _t_cdp = _StepTimer("连接 Browser Use CDP")
             browser = p.chromium.connect_over_cdp(session_info_open.connect_url)
+            _t_cdp.done()
             # Browser Use 通常已有默认 context/page
             if browser.contexts:
                 context = browser.contexts[0]
@@ -634,12 +1072,16 @@ def run_browser_use_registration(
 
             start_url = str(getattr(_cfg, "BROWSER_USE_START_URL", "https://chatgpt.com/auth/login") or "https://chatgpt.com/auth/login")
             logger.info("[BrowserUse] 打开登录页：%s", start_url)
+            _t_goto = _StepTimer("打开登录页")
             page.goto(start_url, wait_until="domcontentloaded")
-            human_delay("navigate")
+            _t_goto.done(f"url={_page_url(page) or '-'}")
+            _bu_delay("navigate")
             _maybe_accept_cookies(page)
             _check_manual_stop()
 
+            _t_email = _StepTimer("填写并提交邮箱")
             _type_email(page, email)
+            _t_email.done()
             logger.info("[BrowserUse] 已提交邮箱：%s", email)
             _assert_not_external_idp(page, "提交邮箱后")
             _check_manual_stop()
@@ -652,26 +1094,30 @@ def run_browser_use_registration(
             max_otp_attempts = 3
             for otp_attempt in range(1, max_otp_attempts + 1):
                 # 等验证码页出现
-                wait_end = time.time() + 30
+                wait_end = time.time() + (6 if _fast_mode() else 30)
                 while time.time() < wait_end and not _is_email_verification_page(page):
                     if any(x in _page_url(page).lower() for x in ("about-you", "profile", "chatgpt.com/")):
                         break
-                    time.sleep(0.4)
+                    time.sleep(0.2 if _fast_mode() else 0.4)
 
                 if current_otp is None:
                     logger.info("[BrowserUse][OTP] 等待验证码：%s（%s/%s）", email, otp_attempt, max_otp_attempts)
+                    _t_otp_wait = _StepTimer("等待邮箱 OTP")
                     current_otp = wait_for_otp(email, after_ts=otp_after_ts)
+                    _t_otp_wait.done()
                 logger.info("[BrowserUse][OTP] 收到验证码：%s", current_otp)
+                _t_otp_submit = _StepTimer("提交邮箱 OTP")
                 _clear_otp_inputs(page)
                 _type_otp(page, current_otp)
-                human_delay("otp_input")
+                _bu_delay("otp_input")
                 try:
                     _click_continue(page)
                 except Exception as exc:
                     logger.info("[BrowserUse][OTP] 提交按钮未找到，继续观察页面：%s", str(exc)[:120])
                 _check_manual_stop()
 
-                outcome = _wait_after_otp(page, timeout=12)
+                outcome = _wait_after_otp(page, timeout=6 if _fast_mode() else 12)
+                _t_otp_submit.done(f"state={outcome}")
                 if outcome in ("accepted", "unknown"):
                     # unknown 也继续尝试资料页/session
                     break
@@ -680,16 +1126,18 @@ def run_browser_use_registration(
                 logger.warning("[BrowserUse][OTP] 验证码可能无效，尝试重发（%s/%s）", otp_attempt + 1, max_otp_attempts)
                 otp_after_ts = time.time()
                 _click_resend_otp(page)
-                human_delay("api")
+                _bu_delay("api")
                 current_otp = None
 
             logger.info("[BrowserUse] 处理资料页/登录态")
-            profile_submitted = _complete_profile_page(page, name, birthday, timeout=60)
+            _t_profile = _StepTimer("资料页/登录态")
+            profile_submitted = _complete_profile_page(page, name, birthday, timeout=28 if _fast_mode() else 60)
             if profile_submitted:
                 create_acknowledged = True
-                human_delay("post_auth")
+                _bu_delay("post_auth")
 
-            session_info = _fetch_chatgpt_session(page, timeout=120)
+            session_info = _fetch_chatgpt_session(page, context=context, timeout=28 if _fast_mode() else 120)
+            _t_profile.done()
             access_token = session_info.get("accessToken")
             if not access_token:
                 raise RuntimeError("注册流程结束但未拿到 accessToken")
@@ -700,26 +1148,31 @@ def run_browser_use_registration(
                 logger.warning("[BrowserUse] 当前路径暂不自动设置 2FA，已跳过")
             totp_secret = None
 
-            # 个人少量账号场景默认不在此驱动里强跑 Codex/SMS。
             codex_result = {
                 "status": "skipped",
                 "ok": True,
-                "message": "Browser Use 注册驱动默认跳过 Codex；可稍后用补跑/协议路径处理",
+                "message": "ENABLE_CODEX_AUTO=False，跳过 Codex",
             }
             try:
                 from config import codex as _codex_cfg
-                if bool(getattr(_codex_cfg, "ENABLE_CODEX", True)) and bool(getattr(_codex_cfg, "ENABLE_CODEX_AUTO", True)):
-                    logger.warning(
-                        "[BrowserUse][Codex] 已启用 Codex 自动授权，但 browser_use 驱动暂未实现手机验证闭环；"
-                        "本次标记为 skipped，请关闭 ENABLE_CODEX_AUTO 或之后补跑"
+                codex_auto_enabled = bool(getattr(_codex_cfg, "ENABLE_CODEX_AUTO", False))
+                oauth_driver = str(getattr(_codex_cfg, "CODEX_OAUTH_DRIVER", "") or "").strip() or "same_as_registration"
+                if codex_auto_enabled:
+                    logger.info(
+                        "[BrowserUse][Codex] ENABLE_CODEX_AUTO=True，注册成功后自动执行 Codex OAuth：driver=%s",
+                        oauth_driver,
                     )
-                    codex_result = {
-                        "status": "skipped",
-                        "ok": True,
-                        "message": "browser_use 暂不自动 Codex（避免卡在手机验证）",
-                    }
-            except Exception:
-                pass
+                    from core.codex_oauth import run_codex_oauth
+                    codex_result = run_codex_oauth(email, otp_provider=wait_for_otp, proxy=proxy, force=True)
+                else:
+                    logger.info("[BrowserUse][Codex] ENABLE_CODEX_AUTO=False，注册后跳过 Codex OAuth")
+            except Exception as exc:
+                logger.warning("[BrowserUse][Codex] 自动授权失败：%s: %s", type(exc).__name__, str(exc)[:220])
+                codex_result = {
+                    "status": "failed",
+                    "ok": False,
+                    "message": f"{type(exc).__name__}: {str(exc)[:220]}",
+                }
 
             account_id = save_account_data(
                 email=email,
@@ -741,6 +1194,7 @@ def run_browser_use_registration(
                     "codex": codex_result,
                 },
             )
+            _t_all.done("success")
             return {
                 "success": True,
                 "email": email,
