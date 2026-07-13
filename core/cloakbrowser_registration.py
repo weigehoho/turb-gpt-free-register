@@ -84,19 +84,27 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
             logger.warning("[Cloak注册] 当前 CloakBrowser 自动化路径暂不执行 2FA 设置，已跳过")
         totp_secret = None
 
-        codex_result = {"status": "skipped", "ok": False, "message": "Cloak注册后未触发"}
+        codex_result = {
+            "status": "skipped",
+            "ok": True,
+            "message": "ENABLE_CODEX_AUTO=False，跳过 Codex",
+        }
         try:
-            from core.roxy_codex_oauth import run_roxy_codex_oauth
-            logger.info("[Cloak注册][Codex] 复用当前 CloakBrowser 窗口执行 Codex 授权")
-            _check_manual_stop()
-            codex_result = run_roxy_codex_oauth(
-                email,
-                reuse_existing_profile=True,
-                existing_driver=driver,
-                existing_opened=opened,
-                force=True,
-                clear_existing_state=True,
-            )
+            from config import codex as _codex_cfg
+            if bool(getattr(_codex_cfg, "ENABLE_CODEX_AUTO", False)):
+                from core.roxy_codex_oauth import run_roxy_codex_oauth
+                logger.info("[Cloak注册][Codex] ENABLE_CODEX_AUTO=True，复用当前 CloakBrowser 窗口执行 Codex 授权")
+                _check_manual_stop()
+                codex_result = run_roxy_codex_oauth(
+                    email,
+                    reuse_existing_profile=True,
+                    existing_driver=driver,
+                    existing_opened=opened,
+                    force=True,
+                    clear_existing_state=True,
+                )
+            else:
+                logger.info("[Cloak注册][Codex] ENABLE_CODEX_AUTO=False，注册后跳过 Codex OAuth")
         except Exception as exc:
             codex_result = {"status": "failed", "ok": False, "message": f"{type(exc).__name__}: {str(exc)[:180]}"}
 

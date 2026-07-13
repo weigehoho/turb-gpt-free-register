@@ -1295,21 +1295,29 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
             logger.warning("[Roxy注册] 当前 Roxy 自动化路径暂不执行 2FA 设置，已跳过")
         totp_secret = None
 
-        codex_result = {"status": "skipped", "ok": False, "message": "Roxy注册后未触发"}
+        codex_result = {
+            "status": "skipped",
+            "ok": True,
+            "message": "ENABLE_CODEX_AUTO=False，跳过 Codex",
+        }
         try:
-            # 注册流程本身已创建 Roxy 一号一环境。这里不能再新建第二个 Roxy 环境；
-            # 复用当前注册窗口，先清理 Cookie/session/localStorage/cache，再开始 Codex 授权。
-            from core.roxy_codex_oauth import run_roxy_codex_oauth
-            logger.info("[Roxy注册][Codex] 复用当前注册 Roxy 窗口执行 Codex 授权，不创建新环境")
-            _check_manual_stop()
-            codex_result = run_roxy_codex_oauth(
-                email,
-                reuse_existing_profile=True,
-                existing_driver=driver,
-                existing_opened=opened,
-                force=True,
-                clear_existing_state=True,
-            )
+            from config import codex as _codex_cfg
+            if bool(getattr(_codex_cfg, "ENABLE_CODEX_AUTO", False)):
+                # 注册流程本身已创建 Roxy 一号一环境。这里不能再新建第二个 Roxy 环境；
+                # 复用当前注册窗口，先清理 Cookie/session/localStorage/cache，再开始 Codex 授权。
+                from core.roxy_codex_oauth import run_roxy_codex_oauth
+                logger.info("[Roxy注册][Codex] ENABLE_CODEX_AUTO=True，复用当前注册 Roxy 窗口执行 Codex 授权，不创建新环境")
+                _check_manual_stop()
+                codex_result = run_roxy_codex_oauth(
+                    email,
+                    reuse_existing_profile=True,
+                    existing_driver=driver,
+                    existing_opened=opened,
+                    force=True,
+                    clear_existing_state=True,
+                )
+            else:
+                logger.info("[Roxy注册][Codex] ENABLE_CODEX_AUTO=False，注册后跳过 Codex OAuth")
         except Exception as exc:
             codex_result = {"status": "failed", "ok": False, "message": f"{type(exc).__name__}: {str(exc)[:180]}"}
 
