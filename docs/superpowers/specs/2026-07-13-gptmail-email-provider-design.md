@@ -8,7 +8,7 @@
 
 - 新增邮箱来源标识 `gptmail`，可单独使用，也可在 `EMAIL_SOURCE` 中与现有来源按顺序兜底。
 - 固定调用 GPTMail 的公开服务地址；不提供 Base URL、邮箱前缀或域名配置。
-- 使用 `POST /api/generate-email` 生成随机邮箱，使用 `GET /api/emails?email=...` 查询收件箱，并以 `GET /api/email/{id}` 获取正文。
+- 使用 `GET /api/generate-email` 生成随机邮箱，使用 `GET /api/emails?email=...` 查询收件箱，并以 `GET /api/email/{id}` 获取正文。
 - 按邮箱领取后开始的时间过滤旧邮件，使用项目既有 OTP 抽取逻辑从主题、纯文本或 HTML 正文中取得六位验证码。
 - 在 Web 的“邮箱 / OTP”配置组增加一个隐藏字段“GPTMail API Key”，保存到 `.env` 的 `GPTMAIL_API_KEY`，运行时热加载。
 - 当 `EMAIL_SOURCE` 含有 `gptmail` 但 API Key 为空时，不发出远端请求；注册任务返回明确错误“请填写 GPTMail API Key”。
